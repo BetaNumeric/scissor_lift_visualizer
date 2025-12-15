@@ -2,6 +2,8 @@
 
 A web application to visualize the kinematics and geometry of a multi-stage scissor lift mechanism.
 
+https://betanumeric.github.io/scissor_lift_visualizer/
+
 ## Controls
 
 * **Arm Length**: Sets the physical length of the scissor arms in millimeters.
@@ -77,12 +79,3 @@ To simulate the actuator driving the lift, we solve the equation above for $W$ g
 
 * **Babel (Standalone)**: Compiles JSX in the browser.
 
-## Usage
-
-This project is contained entirely within the `index.html` file.
-
-1. Download `index.html`.
-
-2. Open the file in any web browser.
-
-3. No internet connection is required after the initial load (libraries are fetched via CDN).
