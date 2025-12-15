@@ -1,0 +1,898 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scissor Lift Visualizer</title>
+    
+    <!-- Error Handler for White Screen Debugging -->
+    <script>
+        window.onerror = function(message, source, lineno, colno, error) {
+            const errorDiv = document.createElement('div');
+            Object.assign(errorDiv.style, {
+                position: 'fixed', top: '0', left: '0', width: '100%',
+                backgroundColor: '#fee2e2', color: '#991b1b', padding: '20px',
+                zIndex: '9999', fontFamily: 'monospace', borderBottom: '2px solid #b91c1c'
+            });
+            errorDiv.innerHTML = `<strong>Application Error:</strong><br>${message}<br><small>${source}:${lineno}</small>`;
+            document.body.appendChild(errorDiv);
+        };
+    </script>
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Import Map -->
+    <script type="importmap">
+        {
+            "imports": {
+                "react": "https://esm.sh/react@18.2.0",
+                "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+                "lucide-react": "https://esm.sh/lucide-react@0.263.1"
+            }
+        }
+    </script>
+
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <style>
+        body { background-color: #f8fafc; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <!-- Main Application Code -->
+    <script type="text/babel" data-type="module">
+        import React, { useState, useEffect, useRef } from 'react';
+        import { createRoot } from 'react-dom/client';
+        // Removed GitCommitHorizontal, using Crosshair instead
+        import { Ruler, ArrowLeftRight, ArrowUpDown, Settings, Play, Pause, MousePointer2, Crosshair, Layers, Calculator, Gauge, Info, Plus, Minus } from 'lucide-react';
+
+        const ScissorLift = () => {
+          // State
+          const [stageCount, setStageCount] = useState(2);
+          const [armLength, setArmLength] = useState(340);
+          const [baseWidth, setBaseWidth] = useState(200);
+          const [isAnimating, setIsAnimating] = useState(false);
+          const [animSpeed, setAnimSpeed] = useState(1); 
+          
+          // Actuator Configuration
+          const [actuatorPos, setActuatorPos] = useState(0); // 0-1 along the arm
+          const [actuatorStage, setActuatorStage] = useState(1); // 1 to stageCount
+          
+          // Interaction State
+          const [dragTarget, setDragTarget] = useState(null);
+          
+          // Tooltip State
+          const [tooltip, setTooltip] = useState({ visible: false, x: 0, y: 0, type: null });
+
+          // Refs
+          const liftCanvasRef = useRef(null);
+          const graphCanvasRef = useRef(null);
+          const animationRef = useRef(null);
+          const directionRef = useRef(1); 
+
+          // Constants
+          const CANVAS_WIDTH = 600;
+          const CANVAS_HEIGHT = 500;
+          const FLOOR_Y = 450;
+          const ANCHOR_X = 200; 
+          const SAFE_ZONE_TOP = 80;
+          
+          const VISUAL_PLATFORM_MARGIN_PX = 40; 
+          const VISUAL_PLATFORM_THICKNESS_PX = 12;
+
+          const inputClass = "w-20 py-1 px-2 border border-slate-300 rounded text-sm font-mono text-center focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-colors";
+
+          const [cursorStyle, setCursorStyle] = useState('default');
+
+          useEffect(() => {
+            if (actuatorStage > stageCount) {
+                setActuatorStage(stageCount);
+            }
+          }, [stageCount, actuatorStage]);
+
+          // --- CALCULATIONS ---
+          const maxPossibleHeight = armLength * stageCount;
+          const availablePixelHeight = FLOOR_Y - SAFE_ZONE_TOP; 
+          let scale = 1;
+          if (maxPossibleHeight > availablePixelHeight) {
+              scale = availablePixelHeight / maxPossibleHeight;
+          }
+          const maxPossibleWidth = armLength + 100;
+          const availablePixelWidth = CANVAS_WIDTH - ANCHOR_X - 50;
+          if (maxPossibleWidth * scale > availablePixelWidth) {
+               scale = Math.min(scale, availablePixelWidth / maxPossibleWidth);
+          }
+
+          const logicalPlatformMargin = VISUAL_PLATFORM_MARGIN_PX / scale;
+
+          const getPointerPos = (canvas, evt) => {
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+            return {
+              x: (evt.clientX - rect.left) * scaleX,
+              y: (evt.clientY - rect.top) * scaleY
+            };
+          };
+
+          const calculateStageHeight = (w, L) => {
+            if (w >= L) return 0;
+            return Math.sqrt(Math.pow(L, 2) - Math.pow(w, 2));
+          };
+
+          const calculateWidthFromTotalHeight = (hTotal, L) => {
+            const hStage = hTotal / stageCount;
+            if (hStage >= L) return 0; 
+            return Math.sqrt(Math.pow(L, 2) - Math.pow(hStage, 2));
+          };
+
+          const stageHeight = calculateStageHeight(baseWidth, armLength);
+          const totalHeight = stageHeight * stageCount;
+          
+          const getActuatorLength = (w, hStage, u, stageIdx) => {
+              const px = (1 - u) * w;
+              const startY = (stageIdx - 1) * hStage;
+              const py = startY + (u * hStage);
+              return Math.sqrt(px*px + py*py);
+          };
+          
+          const getActuatorTargetCoords = () => {
+              const actTargetX = ANCHOR_X + (1 - actuatorPos) * baseWidth;
+              const heightOffset = (actuatorStage - 1) * stageHeight;
+              const actTargetY = FLOOR_Y - (heightOffset + actuatorPos * stageHeight);
+              return { x: actTargetX, y: actTargetY };
+          };
+
+          const currentActuatorLength = getActuatorLength(baseWidth, stageHeight, actuatorPos, actuatorStage);
+          
+          const actLogX = (1 - actuatorPos) * baseWidth;
+          const actLogY = ((actuatorStage - 1) * stageHeight) + (actuatorPos * stageHeight);
+
+          // --- INTERACTION HANDLERS ---
+          const checkHitPlatform = (mouseX, mouseY) => {
+            const visualThickness = VISUAL_PLATFORM_THICKNESS_PX / scale;
+            const platScreenX = ANCHOR_X - (logicalPlatformMargin * scale);
+            const platScreenWidth = (armLength + logicalPlatformMargin * 2) * scale;
+            const platScreenY = FLOOR_Y - (totalHeight * scale) - (visualThickness * scale);
+            const platScreenH = visualThickness * scale;
+            const padding = 20;
+            
+            return (
+              mouseX >= platScreenX - padding &&
+              mouseX <= platScreenX + platScreenWidth + padding &&
+              mouseY >= platScreenY - padding &&
+              mouseY <= platScreenY + platScreenH + padding
+            );
+          };
+
+          const checkHitBase = (mouseX, mouseY) => {
+            const baseScreenX = ANCHOR_X + (baseWidth * scale);
+            const baseScreenY = FLOOR_Y;
+            const radius = 25; 
+            const dist = Math.sqrt(Math.pow(mouseX - baseScreenX, 2) + Math.pow(mouseY - baseScreenY, 2));
+            return dist <= radius;
+          };
+          
+          const checkHitActuatorMount = (mouseX, mouseY) => {
+              const { x, y } = getActuatorTargetCoords();
+              const screenX = ANCHOR_X + (x - ANCHOR_X) * scale;
+              const screenY = FLOOR_Y + (y - FLOOR_Y) * scale;
+              const radius = 12; 
+              const dist = Math.sqrt(Math.pow(mouseX - screenX, 2) + Math.pow(mouseY - screenY, 2));
+              return dist <= radius;
+          };
+
+          const handlePointerDown = (e) => {
+            const canvas = liftCanvasRef.current;
+            if (!canvas) return;
+            
+            e.target.setPointerCapture(e.pointerId);
+            
+            const { x, y } = getPointerPos(canvas, e);
+
+            if (checkHitActuatorMount(x, y)) {
+                setDragTarget('actuator');
+                setIsAnimating(false);
+                setCursorStyle('crosshair');
+            } else if (checkHitPlatform(x, y)) {
+              setDragTarget('platform');
+              setIsAnimating(false);
+              setCursorStyle('grabbing');
+            } else if (checkHitBase(x, y)) {
+              setDragTarget('base');
+              setIsAnimating(false);
+              setCursorStyle('ew-resize');
+            }
+          };
+
+          const handlePointerMove = (e) => {
+            const canvas = liftCanvasRef.current;
+            if (!canvas) return;
+            const { x, y } = getPointerPos(canvas, e);
+
+            if (dragTarget) {
+                if (dragTarget === 'platform') {
+                    let targetHeight = (FLOOR_Y - y) / scale;
+                    const maxH = armLength * stageCount;
+                    
+                    if (targetHeight < 1) targetHeight = 0;
+                    if (targetHeight > maxH) targetHeight = maxH;
+                    
+                    const newWidth = calculateWidthFromTotalHeight(targetHeight, armLength);
+                    
+                    if (!isNaN(newWidth)) {
+                        const safeWidth = Math.max(20, Math.min(newWidth, armLength));
+                        setBaseWidth(safeWidth);
+                    }
+                } 
+                else if (dragTarget === 'base') {
+                    let newWidth = (x - ANCHOR_X) / scale;
+                    newWidth = Math.max(20, Math.min(newWidth, armLength));
+                    setBaseWidth(newWidth);
+                }
+                else if (dragTarget === 'actuator') {
+                    const mouseLogX = ANCHOR_X + (x - ANCHOR_X) / scale;
+                    const mouseLogY = FLOOR_Y + (y - FLOOR_Y) / scale;
+                    
+                    const getProjection = (px, py, x1, y1, x2, y2) => {
+                        const l2 = Math.pow(x2 - x1, 2) + Math.pow(y2 - y1, 2);
+                        if (l2 === 0) return { distSq: Infinity, t: 0 };
+                        let t = ((px - x1) * (x2 - x1) + (py - y1) * (y2 - y1)) / l2;
+                        t = Math.max(0, Math.min(1, t));
+                        const projX = x1 + t * (x2 - x1);
+                        const projY = y1 + t * (y2 - y1);
+                        const distSq = Math.pow(px - projX, 2) + Math.pow(py - projY, 2);
+                        return { distSq, t };
+                    };
+                    
+                    let bestMatch = { distSq: Infinity, stage: 1, t: 0 };
+
+                    for (let i = 1; i <= stageCount; i++) {
+                        const sP1 = { x: ANCHOR_X + baseWidth, y: FLOOR_Y - (i-1)*stageHeight };
+                        const sP2 = { x: ANCHOR_X, y: FLOOR_Y - i*stageHeight };
+                        
+                        const proj = getProjection(mouseLogX, mouseLogY, sP1.x, sP1.y, sP2.x, sP2.y);
+                        
+                        if (proj.distSq < bestMatch.distSq) {
+                            bestMatch = { distSq: proj.distSq, stage: i, t: proj.t };
+                        }
+                    }
+                    
+                    setActuatorStage(bestMatch.stage);
+                    setActuatorPos(bestMatch.t);
+                }
+                return;
+            }
+
+            if (checkHitActuatorMount(x, y)) setCursorStyle('crosshair');
+            else if (checkHitPlatform(x, y)) setCursorStyle('grab');
+            else if (checkHitBase(x, y)) setCursorStyle('ew-resize');
+            else setCursorStyle('default');
+          };
+
+          const handlePointerUp = (e) => {
+            setDragTarget(null);
+            setCursorStyle('default');
+            e.target.releasePointerCapture(e.pointerId);
+          };
+
+          // --- ANIMATION LOOP (ACTUATOR DRIVEN) ---
+          useEffect(() => {
+            const animate = () => {
+              if (!isAnimating) return;
+
+              setBaseWidth((prevW) => {
+                const h_Wmin = calculateStageHeight(20, armLength);
+                const len_Wmin = getActuatorLength(20, h_Wmin, actuatorPos, actuatorStage);
+                
+                const h_Wmax = calculateStageHeight(armLength, armLength); 
+                const len_Wmax = getActuatorLength(armLength, h_Wmax, actuatorPos, actuatorStage);
+                
+                const minLen = Math.min(len_Wmin, len_Wmax);
+                const maxLen = Math.max(len_Wmin, len_Wmax);
+                
+                const strokeRange = maxLen - minLen;
+                
+                if (strokeRange < 1) return prevW;
+
+                const hStage = calculateStageHeight(prevW, armLength);
+                const currentLen = getActuatorLength(prevW, hStage, actuatorPos, actuatorStage);
+                
+                const step = strokeRange * 0.005 * animSpeed * directionRef.current;
+                let nextLen = currentLen + step;
+                
+                let hitLimit = false;
+                if (nextLen >= maxLen) {
+                    nextLen = maxLen - 0.01; 
+                    hitLimit = true;
+                } else if (nextLen <= minLen) {
+                    nextLen = minLen + 0.01;
+                    hitLimit = true;
+                }
+                
+                if (hitLimit) directionRef.current *= -1;
+
+                const C1 = 1 - actuatorPos;
+                const C2 = (actuatorStage - 1) + actuatorPos;
+                const denom = (C1*C1) - (C2*C2);
+                
+                if (Math.abs(denom) < 0.0001) {
+                    directionRef.current *= -1;
+                    return prevW;
+                }
+
+                const num = (nextLen * nextLen) - (C2 * C2 * armLength * armLength);
+                const w2 = num / denom;
+
+                if (w2 < 0) {
+                    directionRef.current *= -1;
+                    return prevW;
+                }
+
+                let nextW = Math.sqrt(w2);
+                if (nextW > armLength) nextW = armLength;
+                if (nextW < 20) nextW = 20;
+
+                return nextW;
+              });
+              
+              animationRef.current = requestAnimationFrame(animate);
+            };
+
+            if (isAnimating) animationRef.current = requestAnimationFrame(animate);
+            else cancelAnimationFrame(animationRef.current);
+            
+            return () => cancelAnimationFrame(animationRef.current);
+          }, [isAnimating, armLength, animSpeed, actuatorPos, actuatorStage]);
+
+          // --- MAIN RENDER LOOP ---
+          useEffect(() => {
+            const canvas = liftCanvasRef.current;
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+
+            ctx.setTransform(1, 0, 0, 1, 0, 0); 
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'alphabetic';
+            
+            ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+            ctx.beginPath();
+            ctx.moveTo(50, FLOOR_Y);
+            ctx.lineTo(550, FLOOR_Y);
+            ctx.strokeStyle = '#94a3b8'; 
+            ctx.lineWidth = 4;
+            ctx.stroke();
+
+            ctx.translate(ANCHOR_X, FLOOR_Y);
+            ctx.scale(scale, scale);
+            ctx.translate(-ANCHOR_X, -FLOOR_Y);
+
+            const lwMain = 8 / scale;
+            const lwHighlight = 2 / scale;
+            const jRad = 6 / scale;
+
+            const drawJoint = (x, y, color = '#334155') => {
+              ctx.beginPath();
+              ctx.arc(x, y, jRad, 0, Math.PI * 2);
+              ctx.fillStyle = color;
+              ctx.fill();
+            };
+
+            const drawArm = (x1, y1, x2, y2) => {
+              ctx.beginPath();
+              ctx.moveTo(x1, y1);
+              ctx.lineTo(x2, y2);
+              ctx.strokeStyle = '#3b82f6'; 
+              ctx.lineWidth = lwMain;
+              ctx.lineCap = 'round';
+              ctx.stroke();
+              ctx.beginPath();
+              ctx.moveTo(x1, y1);
+              ctx.lineTo(x2, y2);
+              ctx.strokeStyle = '#93c5fd'; 
+              ctx.lineWidth = lwHighlight;
+              ctx.stroke();
+            };
+
+            for (let i = 0; i < stageCount; i++) {
+              const currentBaseY = FLOOR_Y - (i * stageHeight);
+              const currentTopY = FLOOR_Y - ((i + 1) * stageHeight);
+              
+              const botLeft = { x: ANCHOR_X, y: currentBaseY };
+              const botRight = { x: ANCHOR_X + baseWidth, y: currentBaseY };
+              const topLeft = { x: ANCHOR_X, y: currentTopY };
+              const topRight = { x: ANCHOR_X + baseWidth, y: currentTopY };
+              const midPoint = { x: ANCHOR_X + (baseWidth / 2), y: (currentBaseY + currentTopY) / 2 };
+
+              drawArm(botLeft.x, botLeft.y, topRight.x, topRight.y);
+              drawArm(botRight.x, botRight.y, topLeft.x, topLeft.y);
+
+              drawJoint(midPoint.x, midPoint.y, '#ef4444');
+              drawJoint(botLeft.x, botLeft.y);
+              
+              if (i === 0) {
+                ctx.beginPath();
+                ctx.arc(botRight.x, botRight.y, 14/scale, 0, Math.PI*2);
+                ctx.fillStyle = dragTarget === 'base' ? '#3b82f6' : 'transparent';
+                ctx.fill();
+                ctx.strokeStyle = '#3b82f6';
+                ctx.lineWidth = 3/scale;
+                ctx.stroke();
+                
+                ctx.beginPath();
+                ctx.arc(botRight.x, botRight.y, jRad, 0, Math.PI*2);
+                ctx.fillStyle = '#ffffff';
+                ctx.fill();
+                
+              } else {
+                drawJoint(botRight.x, botRight.y);
+              }
+              drawJoint(topLeft.x, topLeft.y);
+              drawJoint(topRight.x, topRight.y);
+            }
+
+            // --- DRAW ACTUATOR ---
+            const actCoords = getActuatorTargetCoords();
+            const actTargetX = actCoords.x;
+            const actTargetY = actCoords.y;
+
+            ctx.beginPath();
+            ctx.moveTo(ANCHOR_X, FLOOR_Y); 
+            ctx.lineTo(actTargetX, actTargetY);
+            ctx.lineWidth = 12 / scale;
+            ctx.strokeStyle = '#eab308'; 
+            ctx.lineCap = 'butt';
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(ANCHOR_X, FLOOR_Y);
+            ctx.lineTo(actTargetX, actTargetY);
+            ctx.lineWidth = 4 / scale;
+            ctx.strokeStyle = '#fef08a'; 
+            ctx.stroke();
+            
+            ctx.beginPath();
+            ctx.arc(actTargetX, actTargetY, 8/scale, 0, Math.PI*2);
+            ctx.fillStyle = dragTarget === 'actuator' ? '#ffffff' : '#ca8a04';
+            ctx.fill();
+            ctx.strokeStyle = '#ca8a04';
+            ctx.lineWidth = 2/scale;
+            ctx.stroke();
+
+            // Actuator Label
+            ctx.setTransform(1, 0, 0, 1, 0, 0); 
+            const screenActMidX = ANCHOR_X + ((actTargetX - ANCHOR_X) / 2) * scale;
+            const screenActMidY = FLOOR_Y + ((actTargetY - FLOOR_Y) / 2) * scale;
+            
+            const labelText = `${Math.round(currentActuatorLength)} mm`;
+            ctx.font = 'bold 12px sans-serif';
+            const textWidth = ctx.measureText(labelText).width;
+            const textPad = 4;
+            
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+            ctx.fillRect(screenActMidX - textWidth/2 - textPad, screenActMidY - 10, textWidth + textPad*2, 20);
+            ctx.fillStyle = '#854d0e'; 
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(labelText, screenActMidX, screenActMidY);
+
+            ctx.translate(ANCHOR_X, FLOOR_Y);
+            ctx.scale(scale, scale);
+            ctx.translate(-ANCHOR_X, -FLOOR_Y);
+
+            // Platform
+            const platformY = FLOOR_Y - totalHeight;
+            const platformRealX = ANCHOR_X - logicalPlatformMargin;
+            const platformRealWidth = armLength + (logicalPlatformMargin * 2);
+            const visualThickness = VISUAL_PLATFORM_THICKNESS_PX / scale;
+
+            ctx.fillStyle = dragTarget === 'platform' ? '#334155' : '#475569'; 
+            ctx.fillRect(platformRealX, platformY - visualThickness, platformRealWidth, visualThickness);
+            
+            ctx.fillStyle = '#ffffff';
+            ctx.beginPath();
+            const handleCenterX = platformRealX + platformRealWidth / 2;
+            const handleCenterY = platformY - (visualThickness / 2);
+            const dotRad = 2 / scale;
+            const dotGap = 10 / scale;
+            ctx.arc(handleCenterX, handleCenterY, dotRad, 0, Math.PI*2);
+            ctx.arc(handleCenterX - dotGap, handleCenterY, dotRad, 0, Math.PI*2);
+            ctx.arc(handleCenterX + dotGap, handleCenterY, dotRad, 0, Math.PI*2);
+            ctx.fill();
+
+            // --- OVERLAYS ---
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            const screenPlatformY = FLOOR_Y - (totalHeight * scale);
+            const screenBaseWidth = baseWidth * scale;
+
+            ctx.beginPath();
+            ctx.moveTo(ANCHOR_X - 60, FLOOR_Y);
+            ctx.lineTo(ANCHOR_X - 60, screenPlatformY);
+            ctx.strokeStyle = '#ef4444';
+            ctx.setLineDash([5, 5]);
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.fillStyle = '#ef4444';
+            ctx.font = '14px sans-serif';
+            ctx.textAlign = 'right';
+            ctx.fillText(`${Math.round(totalHeight)} mm`, ANCHOR_X - 70, (FLOOR_Y + screenPlatformY) / 2);
+            ctx.textAlign = 'left';
+
+            ctx.beginPath();
+            ctx.moveTo(ANCHOR_X, FLOOR_Y + 20);
+            ctx.lineTo(ANCHOR_X + screenBaseWidth, FLOOR_Y + 20);
+            ctx.strokeStyle = '#22c55e';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            ctx.fillStyle = '#22c55e';
+            ctx.fillText(`${Math.round(baseWidth)} mm`, ANCHOR_X + (screenBaseWidth/2) - 20, FLOOR_Y + 40);
+
+            ctx.fillStyle = '#000000';
+            ctx.beginPath();
+            ctx.arc(ANCHOR_X, FLOOR_Y, 4, 0, Math.PI*2);
+            ctx.fill();
+            
+            if (!dragTarget && !isAnimating) {
+                ctx.fillStyle = '#3b82f6';
+                ctx.font = 'bold 12px sans-serif';
+                ctx.fillText("↕ Drag", ANCHOR_X + 20, screenPlatformY - 20);
+                ctx.fillText("↔ Drag", ANCHOR_X + screenBaseWidth + 15, FLOOR_Y + 15);
+                
+                const actScreenPos = getActuatorTargetCoords();
+                const actScreenX = ANCHOR_X + (actScreenPos.x - ANCHOR_X) * scale;
+                const actScreenY = FLOOR_Y + (actScreenPos.y - FLOOR_Y) * scale;
+                ctx.fillStyle = '#ca8a04';
+                ctx.fillText("✛ Move", actScreenX + 15, actScreenY - 10);
+            }
+
+          }, [baseWidth, armLength, stageHeight, totalHeight, dragTarget, scale, actuatorPos, actuatorStage, logicalPlatformMargin, currentActuatorLength, stageCount]); 
+
+          // --- GRAPH DRAWING ---
+          useEffect(() => {
+            const canvas = graphCanvasRef.current;
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+            const width = canvas.width;
+            const height = canvas.height;
+
+            ctx.setTransform(1, 0, 0, 1, 0, 0); 
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'alphabetic';
+
+            ctx.clearRect(0, 0, width, height);
+            const padding = 35;
+            const graphWidth = width - padding * 2;
+            const graphHeight = height - padding * 2;
+            
+            ctx.beginPath();
+            ctx.moveTo(padding, padding);
+            ctx.lineTo(padding, height - padding);
+            ctx.lineTo(width - padding, height - padding);
+            ctx.strokeStyle = '#64748b';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            ctx.fillStyle = '#64748b';
+            ctx.font = '10px sans-serif';
+            ctx.fillText("Total Height", 0, padding - 5);
+            
+            let xLabel = "Actuator Length";
+            if (actuatorPos === 0 && actuatorStage === 1) xLabel = "Actuator (Width)";
+            if (actuatorPos === 1 && actuatorStage === 1) xLabel = "Actuator (Vertical)";
+            ctx.fillText(xLabel, width - padding - 40, height - 10);
+
+            let isSingularity = false;
+            if (actuatorStage === 1 && Math.abs(actuatorPos - 0.5) < 0.05) isSingularity = true;
+            if (actuatorStage === 2 && actuatorPos < 0.05) isSingularity = true;
+
+            if (isSingularity) {
+                ctx.fillStyle = '#ef4444';
+                ctx.fillText("Singularity!", width/2 - 20, height/2);
+            }
+
+            ctx.beginPath();
+            ctx.strokeStyle = '#3b82f6';
+            ctx.lineWidth = 2;
+
+            const maxActLen = getActuatorLength(armLength, 0, actuatorPos, actuatorStage); 
+            const minActLen = getActuatorLength(0, armLength, actuatorPos, actuatorStage); 
+            
+            const xMin = Math.min(maxActLen, minActLen);
+            const xMax = Math.max(maxActLen, minActLen);
+            const yMax = armLength * stageCount;
+
+            for (let w = 0; w <= armLength; w+=2) {
+               const hStage = calculateStageHeight(w, armLength);
+               const hTotal = hStage * stageCount;
+               const actLen = getActuatorLength(w, hStage, actuatorPos, actuatorStage);
+               
+               let normalizedX = (actLen - xMin) / (xMax - xMin || 1); 
+               const plotX = padding + normalizedX * graphWidth;
+               const plotY = (height - padding) - (hTotal / yMax) * graphHeight;
+
+               if (w === 0) ctx.moveTo(plotX, plotY);
+               else ctx.lineTo(plotX, plotY);
+            }
+            ctx.stroke();
+
+            const curActLen = getActuatorLength(baseWidth, stageHeight, actuatorPos, actuatorStage);
+            const curNormX = (curActLen - xMin) / (xMax - xMin || 1);
+            const curX = padding + curNormX * graphWidth;
+            const curY = (height - padding) - (totalHeight / yMax) * graphHeight;
+
+            ctx.beginPath();
+            ctx.arc(curX, curY, 5, 0, Math.PI * 2);
+            ctx.fillStyle = '#ef4444';
+            ctx.fill();
+
+            const isNearRight = curX > width - 80;
+            const isNearTop = curY < 50;
+            
+            ctx.font = '10px sans-serif';
+            const textH = `H: ${Math.round(totalHeight)}`;
+            const textL = `L: ${Math.round(curActLen)}`;
+            const maxW = Math.max(ctx.measureText(textH).width, ctx.measureText(textL).width);
+            
+            const boxX = isNearRight ? curX - 10 - maxW : curX + 10;
+            const boxY = isNearTop ? curY + 10 : curY - 30;
+            const boxW = maxW + 8;
+            const boxH = 34;
+
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+            ctx.fillRect(boxX - 4, boxY - 4, boxW, boxH);
+            
+            ctx.fillStyle = '#1e293b';
+            ctx.textAlign = 'left'; 
+            ctx.textBaseline = 'top';
+            ctx.fillText(textH, boxX, boxY);
+            ctx.fillText(textL, boxX, boxY + 14);
+
+          }, [baseWidth, armLength, totalHeight, actuatorPos, actuatorStage, stageCount]);
+
+          return (
+            <div className="flex flex-col items-center w-full max-w-4xl mx-auto p-4 bg-slate-50 rounded-xl shadow-lg font-sans">
+              <div className="mb-4 text-center">
+                <h1 className="text-xl font-bold text-slate-800">Scissor Lift Visualizer</h1>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6 w-full">
+                
+                {/* LEFT COLUMN: Controls */}
+                <div className="md:col-span-1 space-y-4 bg-white p-4 rounded-lg shadow-sm border border-slate-200 h-fit">
+                  <div className="flex items-center justify-between mb-2">
+                    <h2 className="text-base font-semibold flex items-center gap-2 text-slate-700">
+                      <Settings size={18} /> Controls
+                    </h2>
+                  </div>
+                    
+                  {/* Animation Row: Button + Slider */}
+                  <div className="flex items-center gap-3">
+                     <button
+                        onClick={() => setIsAnimating(!isAnimating)}
+                        className={`p-2 rounded-lg flex items-center justify-center transition-colors ${
+                            isAnimating 
+                            ? 'bg-red-100 text-red-600 hover:bg-red-200' 
+                            : 'bg-green-100 text-green-600 hover:bg-green-200'
+                        }`}
+                        title={isAnimating ? "Pause" : "Play"}
+                    >
+                        {isAnimating ? <Pause size={20}/> : <Play size={20}/>}
+                    </button>
+                    <div className="flex-1">
+                         <div className="flex justify-between text-[10px] text-slate-400 font-bold uppercase mb-1">
+                            <span>Speed</span>
+                            <span>{animSpeed}x</span>
+                         </div>
+                         <input
+                            type="range"
+                            min="0.1"
+                            max="5"
+                            step="0.1"
+                            value={animSpeed}
+                            onChange={(e) => setAnimSpeed(Number(e.target.value))}
+                            className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-green-500"
+                        />
+                    </div>
+                  </div>
+
+                  {/* NEW: Stage Count Row */}
+                  <div className="flex items-center justify-between pt-3 border-t border-slate-100">
+                      <label className="text-sm text-slate-600">Stage Count</label>
+                       <div className="flex items-center gap-2">
+                           <input 
+                              type="number"
+                              min="1"
+                              max="10"
+                              step="1"
+                              value={stageCount}
+                              onChange={(e) => setStageCount(Number(e.target.value))}
+                              className={inputClass}
+                           />
+                       </div>
+                  </div>
+
+                  {/* Actuator Stage Toggle - Dynamic Numeric */}
+                  <div className="flex items-center justify-between pt-3 border-t border-slate-100">
+                     <span className="text-sm text-slate-600 flex items-center gap-2">Actuator Level</span>
+                     <div className="flex items-center gap-2 bg-slate-100 rounded p-1">
+                         <button 
+                            onClick={() => setActuatorStage(s => Math.max(1, s - 1))}
+                            disabled={actuatorStage <= 1}
+                            className="p-1 rounded hover:bg-white disabled:opacity-30"
+                         >
+                             <Minus size={14}/>
+                         </button>
+                         <span className="font-mono font-bold text-sm w-4 text-center">{actuatorStage}</span>
+                         <button 
+                            onClick={() => setActuatorStage(s => Math.min(stageCount, s + 1))}
+                            disabled={actuatorStage >= stageCount}
+                            className="p-1 rounded hover:bg-white disabled:opacity-30"
+                         >
+                             <Plus size={14}/>
+                 </button>
+                     </div>
+                  </div>
+
+                  {/* Actuator Angle Control */}
+                  <div className="bg-yellow-50 p-3 rounded-lg border border-yellow-200">
+                      <label className="block text-sm font-medium text-yellow-800 mb-2 flex justify-between">
+                          <span className="flex items-center gap-2"><Crosshair size={14}/> Mount Position</span>
+                          <span className="font-mono">{Math.round(actuatorPos * 100)}%</span>
+                      </label>
+                      <input
+                          type="range"
+                          min="0"
+                          max="1"
+                          step="0.01"
+                          value={actuatorPos}
+                          onChange={(e) => setActuatorPos(Number(e.target.value))}
+                          className="w-full h-2 bg-yellow-200 rounded-lg appearance-none cursor-pointer accent-yellow-600"
+                      />
+                      <div className="flex justify-between text-[10px] text-yellow-700 mt-1 uppercase font-bold">
+                          <span>Horizontal</span>
+                          <span>Vertical</span>
+                      </div>
+                  </div>
+
+                  {/* Arm Length - Row */}
+                  <div className="flex items-center justify-between pt-3 border-t border-slate-100">
+                      <label className="text-sm text-slate-600">Arm Length</label>
+                       <div className="flex items-center gap-2">
+                           <input 
+                              type="number"
+                              min="50"
+                              step="10"
+                              value={armLength}
+                              onChange={(e) => {
+                                  const val = Number(e.target.value);
+                                  setArmLength(val);
+                                  if (baseWidth > val) setBaseWidth(val);
+                              }}
+                              className={inputClass}
+                           />
+                           <span className="text-xs text-slate-400">mm</span>
+                       </div>
+                  </div>
+
+                  {/* Formula Compact with Tooltip */}
+                  <div 
+                    className="pt-4 border-t border-slate-100"
+                  >
+                      <div className="flex flex-col gap-2">
+                         {/* Lift Height Box */}
+                         <div 
+                            className="p-2 bg-blue-50 border border-blue-100 rounded text-xs text-blue-900 font-mono cursor-help relative group"
+                            onMouseEnter={() => setTooltip({ visible: true, type: 'height', x: 0, y: 0 })}
+                            onMouseMove={(e) => setTooltip(prev => ({ ...prev, visible: true, type: 'height', x: e.clientX, y: e.clientY }))}
+                            onMouseLeave={() => setTooltip({ visible: false, x: 0, y: 0, type: null })}
+                         >
+                            <div className="flex items-center justify-between w-full">
+                                <div className="truncate mr-1 flex items-center">
+                                    <span className="font-bold mr-1">{Math.round(totalHeight)} mm</span>
+                                    <span className="text-blue-700">= {stageCount} × √({armLength}² - {Math.round(baseWidth)}²)</span>
+                                </div>
+                                <Info size={14} className="text-blue-400 flex-shrink-0"/>
+                            </div>
+                         </div>
+
+                         {/* Actuator Length Box */}
+                          <div 
+                            className="p-2 bg-yellow-50 border border-yellow-100 rounded text-xs text-yellow-900 font-mono cursor-help relative group"
+                            onMouseEnter={() => setTooltip({ visible: true, type: 'actuator', x: 0, y: 0 })}
+                            onMouseMove={(e) => setTooltip(prev => ({ ...prev, visible: true, type: 'actuator', x: e.clientX, y: e.clientY }))}
+                            onMouseLeave={() => setTooltip({ visible: false, x: 0, y: 0, type: null })}
+                          >
+                            <div className="flex items-center justify-between w-full">
+                                <div className="truncate mr-1 flex items-center">
+                                    <span className="font-bold mr-1">{Math.round(currentActuatorLength)} mm</span>
+                                    <span className="text-yellow-700">= √({Math.round(actLogX)}² + {Math.round(actLogY)}²)</span>
+                                </div>
+                                <Info size={14} className="text-yellow-600 flex-shrink-0"/>
+                            </div>
+                         </div>
+                      </div>
+                  </div>
+                  
+                  {/* Enhanced Floating Tooltip */}
+                  {tooltip.visible && (
+                      <div 
+                        className="fixed z-50 p-3 bg-slate-800 text-white text-xs rounded shadow-lg pointer-events-none"
+                        style={{ left: tooltip.x + 15, top: tooltip.y + 15 }}
+                      >
+                         <div className="font-bold mb-2 border-b border-slate-600 pb-1">
+                             {tooltip.type === 'height' ? 'Height Formula' : 'Actuator Formula'}
+                         </div>
+                         
+                         {tooltip.type === 'height' && (
+                             <>
+                                <div className="mb-2 text-center text-blue-300 font-bold bg-slate-700 p-1 rounded">
+                                     H = N × √(L² - W²)
+                                </div>
+                                <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
+                                    <span className="font-mono text-blue-300 text-right">H</span> <span>Total Height</span>
+                                    <span className="font-mono text-slate-400 text-right">N</span> <span>Stage Count ({stageCount})</span>
+                                    <span className="font-mono text-slate-400 text-right">L</span> <span>Arm Length</span>
+                                    <span className="font-mono text-slate-400 text-right">W</span> <span>Base Width</span>
+                                </div>
+                             </>
+                         )}
+
+                         {tooltip.type === 'actuator' && (
+                             <>
+                                <div className="mb-2 text-center text-yellow-300 font-bold bg-slate-700 p-1 rounded">
+                                     L_act = √(x² + y²)
+                                </div>
+                                <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
+                                    <span className="font-mono text-yellow-300 text-right">L_act</span> <span>Actuator Length</span>
+                                    <span className="font-mono text-slate-400 text-right">x</span> <span>Target X (Horiz)</span>
+                                    <span className="font-mono text-slate-400 text-right">y</span> <span>Target Y (Vert)</span>
+                                </div>
+                             </>
+                         )}
+                      </div>
+                  )}
+                  
+                  <div className="mt-2">
+                     <canvas 
+                       ref={graphCanvasRef} 
+                       width={250} 
+                       height={150} 
+                       className="w-full bg-white border border-slate-200 rounded"
+                     />
+                  </div>
+                </div>
+                
+                {/* RIGHT COLUMN: Visualization */}
+                <div className="md:col-span-2 bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden flex flex-col">
+
+                  <div className="flex-1 flex items-center justify-center p-4 bg-slate-50 relative">
+                     <canvas 
+                       ref={liftCanvasRef}
+                       width={CANVAS_WIDTH}
+                       height={CANVAS_HEIGHT}
+                       className="max-w-full h-auto touch-none"
+                       style={{ cursor: cursorStyle }}
+                       onPointerDown={handlePointerDown}
+                       onPointerMove={handlePointerMove}
+                       onPointerUp={handlePointerUp}
+                       onPointerLeave={handlePointerUp}
+                     />
+                     
+                  </div>
+                </div>
+
+              </div>
+            </div>
+          );
+        };
+
+        const root = createRoot(document.getElementById('root'));
+        root.render(<ScissorLift />);
+    </script>
+</body>
+</html>
